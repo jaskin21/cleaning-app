@@ -1,0 +1,277 @@
+// Cleaning Business App — Prisma Schema
+// Database: PostgreSQL (via Supabase)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────
+
+enum Role {
+  CUSTOMER
+  PROVIDER
+  ADMIN
+}
+
+enum VerificationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum DocumentType {
+  ID
+  NBI_CLEARANCE
+  CERTIFICATION
+}
+
+enum BookingStatus {
+  PENDING
+  ACCEPTED
+  EN_ROUTE
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum PaymentMethod {
+  GCASH
+  QRPH_MAYA
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum PayoutStatus {
+  PENDING
+  RELEASED
+}
+
+enum LoyaltyTransactionType {
+  EARNED
+  REDEEMED
+}
+
+// ─────────────────────────────────────────────
+// Core identity
+// ─────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(cuid())
+  email        String?  @unique
+  phone        String?  @unique
+  passwordHash String?  @map("password_hash")
+  role         Role
+  fullName     String   @map("full_name")
+  avatarUrl    String?  @map("avatar_url")
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  customerProfile CustomerProfile?
+  providerProfile ProviderProfile?
+  addresses       Address[]
+
+  bookingsAsCustomer Booking[] @relation("CustomerBookings")
+  bookingsAsProvider Booking[] @relation("ProviderBookings")
+
+  reviewsGiven    Review[] @relation("CustomerReviews")
+  reviewsReceived Review[] @relation("ProviderReviews")
+
+  verifiedDocuments ProviderDocument[] @relation("DocumentReviewer")
+
+  @@map("users")
+}
+
+model CustomerProfile {
+  id             String  @id @default(cuid())
+  userId         String  @unique @map("user_id")
+  user           User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  defaultAddressId String? @map("default_address_id")
+  loyaltyPoints  Int     @default(0) @map("loyalty_points") // v2
+
+  loyaltyTransactions LoyaltyTransaction[]
+
+  @@map("customer_profiles")
+}
+
+model ProviderProfile {
+  id                   String             @id @default(cuid())
+  userId               String             @unique @map("user_id")
+  user                 User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bio                  String?
+  experienceYears      Int?               @map("experience_years")
+  serviceAreaRadiusKm  Float?             @map("service_area_radius_km")
+  isOnline             Boolean            @default(false) @map("is_online")
+  currentLat           Float?             @map("current_lat")
+  currentLng           Float?             @map("current_lng")
+  verificationStatus   VerificationStatus @default(PENDING) @map("verification_status")
+  verifiedAt           DateTime?          @map("verified_at")
+  verifiedById         String?            @map("verified_by")
+
+  documents ProviderDocument[]
+
+  @@map("provider_profiles")
+}
+
+model ProviderDocument {
+  id             String       @id @default(cuid())
+  providerId     String       @map("provider_id")
+  provider       ProviderProfile @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  type           DocumentType
+  fileUrl        String       @map("file_url") // Supabase Storage path
+  uploadedAt     DateTime     @default(now()) @map("uploaded_at")
+  reviewedStatus VerificationStatus @default(PENDING) @map("reviewed_status")
+  reviewedById   String?      @map("reviewed_by")
+  reviewer       User?        @relation("DocumentReviewer", fields: [reviewedById], references: [id])
+
+  @@map("provider_documents")
+}
+
+model Address {
+  id        String  @id @default(cuid())
+  userId    String  @map("user_id")
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label     String  // e.g. "Home"
+  line1     String
+  city      String
+  lat       Float
+  lng       Float
+  isDefault Boolean @default(false) @map("is_default")
+
+  bookings Booking[]
+
+  @@map("addresses")
+}
+
+// ─────────────────────────────────────────────
+// Service catalog
+// ─────────────────────────────────────────────
+
+model Service {
+  id              String   @id @default(cuid())
+  name            String   // e.g. "Home Cleaning", "Deep Cleaning"
+  description     String?
+  basePrice       Decimal  @map("base_price") @db.Decimal(10, 2)
+  durationMinutes Int      @map("duration_minutes")
+
+  bookings Booking[]
+  extras   ServiceExtra[]
+
+  @@map("services")
+}
+
+model ServiceExtra {
+  id        String   @id @default(cuid())
+  serviceId String?  @map("service_id") // nullable = applies globally
+  service   Service? @relation(fields: [serviceId], references: [id])
+  name      String   // e.g. "Ironing", "Window Cleaning"
+  price     Decimal  @db.Decimal(10, 2)
+
+  bookingExtras BookingExtra[]
+
+  @@map("service_extras")
+}
+
+// ─────────────────────────────────────────────
+// Bookings
+// ─────────────────────────────────────────────
+
+model Booking {
+  id          String        @id @default(cuid())
+  customerId  String        @map("customer_id")
+  customer    User          @relation("CustomerBookings", fields: [customerId], references: [id])
+  providerId  String?       @map("provider_id") // nullable until accepted — enables atomic claim
+  provider    User?         @relation("ProviderBookings", fields: [providerId], references: [id])
+  serviceId   String        @map("service_id")
+  service     Service       @relation(fields: [serviceId], references: [id])
+  addressId   String        @map("address_id")
+  address     Address       @relation(fields: [addressId], references: [id])
+
+  scheduledAt DateTime      @map("scheduled_at")
+  status      BookingStatus @default(PENDING)
+  totalAmount Decimal       @map("total_amount") @db.Decimal(10, 2)
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  acceptedAt  DateTime? @map("accepted_at")
+  startedAt   DateTime? @map("started_at")
+  completedAt DateTime? @map("completed_at")
+
+  extras  BookingExtra[]
+  payment Payment?
+  review  Review?
+
+  @@map("bookings")
+}
+
+model BookingExtra {
+  id             String       @id @default(cuid())
+  bookingId      String       @map("booking_id")
+  booking        Booking      @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  extraId        String       @map("extra_id")
+  extra          ServiceExtra @relation(fields: [extraId], references: [id])
+  priceAtBooking Decimal      @map("price_at_booking") @db.Decimal(10, 2)
+
+  @@map("booking_extras")
+}
+
+// ─────────────────────────────────────────────
+// Payments
+// ─────────────────────────────────────────────
+
+model Payment {
+  id                       String        @id @default(cuid())
+  bookingId                String        @unique @map("booking_id")
+  booking                  Booking       @relation(fields: [bookingId], references: [id])
+  amount                   Decimal       @db.Decimal(10, 2)
+  method                   PaymentMethod
+  paymongoPaymentIntentId  String?       @map("paymongo_payment_intent_id")
+  status                   PaymentStatus @default(PENDING)
+  paidAt                   DateTime?     @map("paid_at")
+  payoutStatus             PayoutStatus  @default(PENDING) @map("payout_status")
+  payoutAt                 DateTime?     @map("payout_at")
+
+  @@map("payments")
+}
+
+// ─────────────────────────────────────────────
+// Reviews & Loyalty
+// ─────────────────────────────────────────────
+
+model Review {
+  id         String   @id @default(cuid())
+  bookingId  String   @unique @map("booking_id")
+  booking    Booking  @relation(fields: [bookingId], references: [id])
+  customerId String   @map("customer_id")
+  customer   User     @relation("CustomerReviews", fields: [customerId], references: [id])
+  providerId String   @map("provider_id")
+  provider   User     @relation("ProviderReviews", fields: [providerId], references: [id])
+  rating     Int      // 1–5
+  comment    String?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@map("reviews")
+}
+
+// v2
+model LoyaltyTransaction {
+  id         String                  @id @default(cuid())
+  customerId String                  @map("customer_id")
+  customer   CustomerProfile         @relation(fields: [customerId], references: [id])
+  bookingId  String?                 @map("booking_id")
+  points     Int
+  type       LoyaltyTransactionType
+  createdAt  DateTime                @default(now()) @map("created_at")
+
+  @@map("loyalty_transactions")
+}
